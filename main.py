@@ -44,7 +44,7 @@ def now_ist():
 # =========================
 # CONFIG
 # =========================
-TIMEFRAME = "1h"
+TIMEFRAME = "5min"
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
