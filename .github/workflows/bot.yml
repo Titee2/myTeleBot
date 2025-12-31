@@ -1,17 +1,16 @@
 name: Telegram Bot Runner
 
 on:
-  schedule:
-    - cron: "*/5 * * * *"   # every 5 minutes
   workflow_dispatch:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 minutes (UTC)
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v4
 
       - name: Set up Python
@@ -21,9 +20,10 @@ jobs:
 
       - name: Install dependencies
         run: |
+          python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run bot
+      - name: Run Telegram bot
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           CHAT_ID: ${{ secrets.CHAT_ID }}
