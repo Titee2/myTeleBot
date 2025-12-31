@@ -11,6 +11,13 @@ import numpy as np
 import time
 from datetime import datetime, timezone, timedelta
 import os
+import sys
+import time
+
+# ===== GITHUB ACTIONS SAFE RUNTIME =====
+MAX_RUNTIME_SECONDS = 5 * 60 * 60 + 50 * 60  # 5h 50m
+START_TIME = time.time()
+
 
 # =========================
 # TELEGRAM CONFIG
@@ -116,6 +123,11 @@ last_state = {}
 send_telegram(f"✅ AI Trend Navigator bot started\n{now_ist()}")
 
 while True:
+    # ⏱ Auto-exit before GitHub kills the runner
+    if time.time() - START_TIME > MAX_RUNTIME_SECONDS:
+        send_telegram("♻️ Bot restarting (GitHub Actions auto-chain)")
+        sys.exit(0)
+
     try:
         symbols = top_25()
         if not symbols:
