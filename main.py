@@ -1,6 +1,6 @@
 # ==========================================================
 # AI TREND NAVIGATOR — TELEGRAM ALERT BOT
-# 5 MINUTE TIMEFRAME (FULLY FIXED / NO REPAINT)
+# GITHUB ACTIONS SAFE • 5 MINUTE • NO REPAINT
 # ==========================================================
 
 import requests
@@ -9,6 +9,7 @@ import numpy as np
 import time
 from datetime import datetime, timedelta
 import os
+import sys
 
 # =========================
 # TELEGRAM CONFIG
@@ -17,12 +18,17 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 if not BOT_TOKEN or not CHAT_ID:
-    raise RuntimeError("❌ BOT_TOKEN or CHAT_ID not set")
+    print("❌ BOT_TOKEN or CHAT_ID missing")
+    sys.exit(1)
 
 def send_telegram(msg):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": CHAT_ID, "text": msg}, timeout=10)
+        requests.post(
+            url,
+            json={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
+        )
     except:
         pass
 
@@ -46,21 +52,40 @@ if not os.path.exists(CSV_FILE):
         f.write("Time,Symbol,Signal,knnMA\n")
 
 # =========================
-# SAFE DATA FETCH
+# SAFE BINANCE FETCH
 # =========================
 def top_25():
     try:
-        r = requests.get(f"{BINANCE}/api/v3/ticker/24hr", timeout=10)
+        r = requests.get(
+            f"{BINANCE}/api/v3/ticker/24hr",
+            timeout=10
+        )
+
         if r.status_code != 200:
             return []
 
         data = r.json()
-        if isinstance(data, dict):
+
+        # 🚨 ABSOLUTE GUARD
+        if not isinstance(data, list):
             return []
 
-        usdt = [x for x in data if x.get("symbol", "").endswith("USDT")]
-        usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-        return [x["symbol"] for x in usdt[:25]]
+        usdt = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+
+            symbol = item.get("symbol")
+            volume = item.get("quoteVolume")
+
+            if not symbol or not volume:
+                continue
+
+            if symbol.endswith("USDT"):
+                usdt.append((symbol, float(volume)))
+
+        usdt.sort(key=lambda x: x[1], reverse=True)
+        return [x[0] for x in usdt[:25]]
 
     except:
         return []
@@ -69,7 +94,11 @@ def klines(symbol):
     try:
         r = requests.get(
             f"{BINANCE}/api/v3/klines",
-            params={"symbol": symbol, "interval": TIMEFRAME, "limit": 200},
+            params={
+                "symbol": symbol,
+                "interval": TIMEFRAME,
+                "limit": 200
+            },
             timeout=10
         )
 
@@ -77,13 +106,18 @@ def klines(symbol):
             return None
 
         data = r.json()
-        if not isinstance(data, list):
+
+        # 🚨 ABSOLUTE GUARD
+        if not isinstance(data, list) or len(data) == 0:
             return None
 
-        df = pd.DataFrame(data, columns=[
-            "ot","o","h","l","c","v",
-            "ct","q","n","tbb","tbq","ig"
-        ])
+        df = pd.DataFrame(
+            data,
+            columns=[
+                "ot","o","h","l","c","v",
+                "ct","q","n","tbb","tbq","ig"
+            ]
+        )
 
         df[["h","l","c"]] = df[["h","l","c"]].astype(float)
         return df
@@ -108,7 +142,8 @@ def mean_of_k_closest(value, target, k):
 def wma(series, length):
     weights = np.arange(1, length + 1)
     return series.rolling(length).apply(
-        lambda x: np.dot(x, weights) / weights.sum(), raw=True
+        lambda x: np.dot(x, weights) / weights.sum(),
+        raw=True
     )
 
 # =========================
@@ -119,79 +154,93 @@ def run_bot():
     last_heartbeat_block = None
 
     send_telegram(
-        "✅ AI Trend Navigator STARTED (5M CONFIRMED candles)\n"
+        "✅ AI Trend Navigator STARTED\n"
+        "TF: 5M • CONFIRMED CANDLES\n"
         f"{(datetime.utcnow()+timedelta(hours=5,minutes=30)).strftime('%Y-%m-%d %H:%M:%S')} IST"
     )
 
     while True:
-        try:
-            symbols = top_25()
-            if not symbols:
-                time.sleep(10)
+        symbols = top_25()
+
+        if not symbols:
+            time.sleep(15)
+            continue
+
+        for sym in symbols:
+            df = klines(sym)
+
+            if df is None or len(df) < 60:
                 continue
 
-            for sym in symbols:
-                df = klines(sym)
-                if df is None or len(df) < 50:
-                    continue
+            # CONFIRMED CANDLE ONLY
+            df = df.iloc[:-1]
 
-                # CONFIRMED CANDLE ONLY
-                df = df.iloc[:-1]
+            hl2 = (df["h"] + df["l"]) / 2
+            value_in = hl2.rolling(PRICE_LEN).mean()
+            target = df["c"].rolling(TARGET_LEN).mean()
 
-                hl2 = (df["h"] + df["l"]) / 2
-                value_in = hl2.rolling(PRICE_LEN).mean()
-                target = df["c"].rolling(TARGET_LEN).mean()
+            knnMA = mean_of_k_closest(
+                value_in.values,
+                target.values,
+                NUM_CLOSEST
+            )
 
-                knnMA = mean_of_k_closest(value_in.values, target.values, NUM_CLOSEST)
-                knnMA = pd.Series(knnMA, index=df.index)
-                knnMA_ = wma(knnMA, 5)
+            knnMA = pd.Series(knnMA, index=df.index)
+            knnMA_ = wma(knnMA, 5)
 
-                a, b, c = knnMA_.iloc[-3], knnMA_.iloc[-2], knnMA_.iloc[-1]
-                if np.isnan([a, b, c]).any():
-                    continue
+            a = knnMA_.iloc[-3]
+            b = knnMA_.iloc[-2]
+            c = knnMA_.iloc[-1]
 
-                switch_up = b < c and b <= a
-                switch_dn = b > c and b >= a
+            if np.isnan([a, b, c]).any():
+                continue
 
-                prev = last_state.get(sym)
+            switch_up = b < c and b <= a
+            switch_dn = b > c and b >= a
 
-                ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
-                ts = ist.strftime("%Y-%m-%d %H:%M:%S")
+            prev = last_state.get(sym)
 
-                if switch_up and prev != "GREEN":
-                    send_telegram(
-                        f"🟢 BUY SIGNAL\n{sym}\nENTRY: {round(c,6)}\nTF: 5M\n{ts} IST"
-                    )
-                    last_state[sym] = "GREEN"
-                    with open(CSV_FILE, "a") as f:
-                        f.write(f"{ts},{sym},BUY,{c}\n")
+            ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+            ts = ist.strftime("%Y-%m-%d %H:%M:%S")
 
-                elif switch_dn and prev != "RED":
-                    send_telegram(
-                        f"🔴 SELL SIGNAL\n{sym}\nENTRY: {round(c,6)}\nTF: 5M\n{ts} IST"
-                    )
-                    last_state[sym] = "RED"
-                    with open(CSV_FILE, "a") as f:
-                        f.write(f"{ts},{sym},SELL,{c}\n")
+            if switch_up and prev != "GREEN":
+                send_telegram(
+                    f"🟢 BUY SIGNAL\n"
+                    f"{sym}\n"
+                    f"ENTRY: {round(c,6)}\n"
+                    f"TF: 5M\n"
+                    f"{ts} IST"
+                )
+                last_state[sym] = "GREEN"
+                with open(CSV_FILE, "a") as f:
+                    f.write(f"{ts},{sym},BUY,{c}\n")
 
-            # ❤️ HEARTBEAT — once per 5-minute block
-            block = ist.minute // 5
-            if block != last_heartbeat_block:
-                send_telegram(f"💓 Bot alive — scanning 5M\n{ts} IST")
-                last_heartbeat_block = block
+            elif switch_dn and prev != "RED":
+                send_telegram(
+                    f"🔴 SELL SIGNAL\n"
+                    f"{sym}\n"
+                    f"ENTRY: {round(c,6)}\n"
+                    f"TF: 5M\n"
+                    f"{ts} IST"
+                )
+                last_state[sym] = "RED"
+                with open(CSV_FILE, "a") as f:
+                    f.write(f"{ts},{sym},SELL,{c}\n")
 
-            time.sleep(SCAN_INTERVAL)
+        # ❤️ HEARTBEAT — once per 5m block
+        block = ist.minute // 5
+        if block != last_heartbeat_block:
+            send_telegram(f"💓 Bot alive • scanning 5M\n{ts} IST")
+            last_heartbeat_block = block
 
-        except Exception as e:
-            send_telegram(f"⚠️ BOT ERROR:\n{e}")
-            time.sleep(30)
+        time.sleep(SCAN_INTERVAL)
 
 # =========================
-# AUTO-RESTART LOOP
+# AUTO-RESTART (GITHUB ACTIONS SAFE)
 # =========================
 while True:
     try:
         run_bot()
-    except Exception as fatal:
-        send_telegram(f"🔥 BOT CRASHED — AUTO RESTARTING\n{fatal}")
+    except Exception as e:
+        send_telegram(f"🔥 BOT CRASHED — RESTARTING\n{e}")
         time.sleep(10)
