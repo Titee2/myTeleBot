@@ -1,6 +1,7 @@
 # ==========================================================
-# AI TREND NAVIGATOR — GITHUB ACTIONS VERSION (FIXED)
+# AI TREND NAVIGATOR — GITHUB ACTIONS SAFE VERSION
 # 5M CONFIRMED CANDLE CLOSE + TELEGRAM ALERTS
+# BINANCE MIRROR ROTATION ENABLED
 # ==========================================================
 
 import requests
@@ -11,7 +12,7 @@ import os
 from datetime import datetime
 
 # =========================
-# WAIT FOR CANDLE CONFIRMATION
+# WAIT FOR CONFIRMED CANDLE
 # =========================
 time.sleep(35)
 
@@ -24,10 +25,23 @@ TARGET_LEN = 5
 NUM_CLOSEST = 3
 SMOOTHING = 5
 
-BINANCE = "https://api.binance.com"
-
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+# =========================
+# BINANCE MIRRORS (ROTATED)
+# =========================
+BINANCE_MIRRORS = [
+    "https://api.binance.com",
+    "https://api1.binance.com",
+    "https://api2.binance.com",
+    "https://api3.binance.com",
+    "https://fapi.binance.com"
+]
+
+current_mirror = 0
+fail_count = 0
+MAX_FAILS = 3
 
 # =========================
 # TELEGRAM
@@ -36,39 +50,55 @@ def send_telegram(msg):
     if not BOT_TOKEN or not CHAT_ID:
         return
 
-    r = requests.post(
-        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-        json={"chat_id": CHAT_ID, "text": msg},
-        timeout=10
-    )
-
-    if r.status_code != 200:
-        print("Telegram error:", r.text)
-
-# =========================
-# SAFE BINANCE REQUEST
-# =========================
-def binance_get(url, params=None):
     try:
-        r = requests.get(url, params=params, timeout=10)
-        data = r.json()
-
-        # Binance error response is a dict, not list
-        if isinstance(data, dict):
-            print("Binance API error:", data)
-            return None
-
-        return data
-
+        requests.post(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+            json={"chat_id": CHAT_ID, "text": msg},
+            timeout=10
+        )
     except Exception as e:
-        print("Binance request failed:", e)
-        return None
+        print("Telegram error:", e)
+
+# =========================
+# BINANCE REQUEST (ROTATING)
+# =========================
+def binance_get(path, params=None):
+    global current_mirror, fail_count
+
+    for _ in range(len(BINANCE_MIRRORS)):
+        base = BINANCE_MIRRORS[current_mirror]
+        url = base + path
+
+        try:
+            r = requests.get(url, params=params, timeout=10)
+            data = r.json()
+
+            # Binance error → rotate
+            if isinstance(data, dict) and "code" in data:
+                print(f"Binance error @ {base}: {data}")
+                raise Exception("Binance API error")
+
+            # Success → reset fail count
+            fail_count = 0
+            return data
+
+        except Exception as e:
+            print(f"Mirror failed: {base}")
+            fail_count += 1
+            current_mirror = (current_mirror + 1) % len(BINANCE_MIRRORS)
+            time.sleep(1)
+
+            if fail_count >= MAX_FAILS:
+                print("Too many failures, aborting run.")
+                return None
+
+    return None
 
 # =========================
 # SYMBOL SELECTION
 # =========================
 def top_25():
-    data = binance_get(f"{BINANCE}/api/v3/ticker/24hr")
+    data = binance_get("/api/v3/ticker/24hr")
     if not data:
         return []
 
@@ -81,7 +111,7 @@ def top_25():
 # =========================
 def klines(symbol):
     data = binance_get(
-        f"{BINANCE}/api/v3/klines",
+        "/api/v3/klines",
         params={
             "symbol": symbol,
             "interval": TIMEFRAME,
@@ -101,7 +131,7 @@ def klines(symbol):
     return df
 
 # =========================
-# INDICATOR CORE
+# INDICATORS
 # =========================
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
@@ -122,12 +152,12 @@ def wma(series, length):
     )
 
 # =========================
-# SCAN ONCE (CONFIRMED CANDLE)
+# SCAN ONCE (CONFIRMED)
 # =========================
 def scan_once():
     symbols = top_25()
     if not symbols:
-        print("No symbols fetched, exiting run.")
+        print("No symbols fetched.")
         return
 
     for sym in symbols:
@@ -150,10 +180,7 @@ def scan_once():
         if len(knn) < 3:
             continue
 
-        a = knn.iloc[-3]
-        b = knn.iloc[-2]
-        c = knn.iloc[-1]
-
+        a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
         if np.isnan([a, b, c]).any():
             continue
 
@@ -165,10 +192,10 @@ def scan_once():
             strength = round(abs(c - b) / abs(b) * 100, 2)
 
             msg = (
-                f"{side} SIGNAL\n"
+                f"📊 {side} SIGNAL\n"
                 f"Symbol: {sym}\n"
                 f"Timeframe: 5m\n"
-                f"Strength: {strength}\n"
+                f"Strength: {strength}%\n"
                 f"Confirmed candle close\n"
                 f"UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
             )
@@ -176,7 +203,8 @@ def scan_once():
             send_telegram(msg)
 
 # =========================
-# RUN
+# START
 # =========================
 if __name__ == "__main__":
+    send_telegram("🚀 Bot Started\nTimeframe: 5m\nMode: Confirmed candle close only")
     scan_once()
