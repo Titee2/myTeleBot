@@ -1,6 +1,6 @@
 # ==========================================================
-# AI TREND NAVIGATOR — DUAL MODE
-# Desktop UI + GitHub Headless Safe
+# AI TREND NAVIGATOR — CONFIRMED COLOR CHANGE TEST
+# 5M Candle Close + Line Color Change ONLY
 # ==========================================================
 
 import requests
@@ -19,10 +19,9 @@ HEADLESS = os.getenv("GITHUB_ACTIONS") == "true"
 if not HEADLESS:
     import tkinter as tk
     from tkinter import ttk
-    from plyer import notification
 
 # =========================
-# TELEGRAM (HEADLESS)
+# TELEGRAM (HEADLESS MODE)
 # =========================
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
@@ -44,14 +43,15 @@ def send_telegram(msg):
 # =========================
 TIMEFRAME = "5m"
 BASE_TF_MIN = 60
-BASE_SMOOTHING = 50
+BASE_SMOOTHING = 50     # original 1H tuning
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
 SCAN_INTERVAL = 60
 BINANCE = "https://api.binance.com"
 
-TF_MIN = int(TIMEFRAME.replace("m","")) if "m" in TIMEFRAME else 60
+# auto-scale smoothing
+TF_MIN = int(TIMEFRAME.replace("m",""))
 SMOOTHING = int(BASE_SMOOTHING * (BASE_TF_MIN / TF_MIN))
 
 # =========================
@@ -59,17 +59,17 @@ SMOOTHING = int(BASE_SMOOTHING * (BASE_TF_MIN / TF_MIN))
 # =========================
 if not HEADLESS:
     root = tk.Tk()
-    root.title("AI Trend Navigator — Dual Alerts")
-    root.geometry("950x450")
+    root.title("Confirmed Color Change — 5M")
+    root.geometry("850x420")
 
-    cols = ("Time","Symbol","Type","Signal","Strength","knnMA")
+    cols = ("Time", "Symbol", "Color")
     tree = ttk.Treeview(root, columns=cols, show="headings")
     for c in cols:
         tree.heading(c, text=c)
-        tree.column(c, width=150)
+        tree.column(c, width=260)
     tree.pack(fill=tk.BOTH, expand=True)
 
-    status = tk.Label(root, text="Running", fg="green")
+    status = tk.Label(root, text="Running (confirmed candles only)", fg="green")
     status.pack(pady=4)
 
 # =========================
@@ -115,30 +115,9 @@ def wma(series, length):
     )
 
 # =========================
-# SIGNAL STRENGTH
+# SCANNER — CONFIRMED ONLY
 # =========================
-def strength_score(a,b,c):
-    raw = abs(b-a) + abs(c-b) + abs(c-a)
-    return min(100, int(raw * 1000))
-
-# =========================
-# ALERT HANDLER
-# =========================
-def emit(sym, typ, signal, strength, value):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    msg = f"{typ} {signal} {sym}\nStrength: {strength}\nknnMA: {round(value,6)}"
-
-    if HEADLESS:
-        send_telegram(msg)
-    else:
-        tree.insert("", 0, values=(ts, sym, typ, signal, strength, round(value,6)))
-        notification.notify(title="AI Trend Navigator", message=msg, timeout=5)
-
-# =========================
-# SCANNER
-# =========================
-last_early = {}
-last_conf = {}
+last_color = {}
 
 def scan():
     while True:
@@ -146,6 +125,7 @@ def scan():
             for sym in top_25():
                 df = klines(sym)
 
+                # === PRICE / TARGET ===
                 hl2 = (df["h"] + df["l"]) / 2
                 value = hl2.rolling(PRICE_LEN).mean()
                 target = df["c"].rolling(TARGET_LEN).mean()
@@ -154,38 +134,39 @@ def scan():
                 knn = pd.Series(knn)
                 knnMA = wma(knn, SMOOTHING)
 
-                if len(knnMA) < 4:
+                # need enough CLOSED candles
+                if len(knnMA) < 5:
                     continue
 
-                # EARLY (LIVE)
-                a,b,c = knnMA.iloc[-3], knnMA.iloc[-2], knnMA.iloc[-1]
-                if not np.isnan([a,b,c]).any():
-                    up = b < c and b <= a
-                    dn = b > c and b >= a
-                    s = strength_score(a,b,c)
+                # --------------------------------------
+                # USE ONLY CLOSED CANDLES
+                # -1 = live (ignored)
+                # -2 = last closed
+                # -3 = previous closed
+                # -4 = closed before that
+                # --------------------------------------
+                slope_prev = knnMA.iloc[-3] - knnMA.iloc[-4]
+                slope_curr = knnMA.iloc[-2] - knnMA.iloc[-3]
 
-                    if up and last_early.get(sym) != "BUY":
-                        emit(sym,"EARLY","BUY",s,c)
-                        last_early[sym] = "BUY"
+                if slope_prev == 0 or slope_curr == 0:
+                    continue
 
-                    elif dn and last_early.get(sym) != "SELL":
-                        emit(sym,"EARLY","SELL",s,c)
-                        last_early[sym] = "SELL"
+                prev_color = "GREEN" if slope_prev > 0 else "RED"
+                curr_color = "GREEN" if slope_curr > 0 else "RED"
 
-                # CONFIRMED
-                a,b,c = knnMA.iloc[-4], knnMA.iloc[-3], knnMA.iloc[-2]
-                if not np.isnan([a,b,c]).any():
-                    up = b < c and b <= a
-                    dn = b > c and b >= a
-                    s = strength_score(a,b,c)
+                # SIGNAL ONLY IF COLOR CHANGED AFTER CLOSE
+                if prev_color != curr_color:
+                    last = last_color.get(sym)
+                    if last != curr_color:
+                        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                        msg = f"{curr_color} COLOR CHANGE (CONFIRMED)\n{sym}\nTF: 5M\n{ts}"
 
-                    if up and last_conf.get(sym) != "BUY":
-                        emit(sym,"CONFIRMED","BUY",s,c)
-                        last_conf[sym] = "BUY"
+                        if HEADLESS:
+                            send_telegram(msg)
+                        else:
+                            tree.insert("", 0, values=(ts, sym, curr_color))
 
-                    elif dn and last_conf.get(sym) != "SELL":
-                        emit(sym,"CONFIRMED","SELL",s,c)
-                        last_conf[sym] = "SELL"
+                        last_color[sym] = curr_color
 
             if not HEADLESS:
                 status.config(text=f"Last scan: {datetime.now().strftime('%H:%M:%S')}")
