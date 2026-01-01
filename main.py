@@ -173,6 +173,7 @@ def send_signal(symbol, side, value, score):
     )
 
     print("➡️ Sending Telegram message...")
+    send_telegram("⚠️ DEBUG: send_signal() was reached")
     send_telegram(msg)
 
     # Telegram rate-limit safety
