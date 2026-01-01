@@ -161,8 +161,6 @@ def send_signal(symbol, side, value, score):
         f"TF: 5m (closed)"
     )
 
-    )
-
 # =========================
 # SCANNER
 # =========================
