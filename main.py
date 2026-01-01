@@ -22,6 +22,9 @@ BINANCE = "https://api.binance.com"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+print("BOT_TOKEN:", "SET" if BOT_TOKEN else "MISSING")
+print("CHAT_ID:", "SET" if CHAT_ID else "MISSING")
+
 
 CSV_FILE = "signals.csv"
 
