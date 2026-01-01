@@ -36,11 +36,22 @@ def send_telegram(msg):
         return
 
     try:
-        requests.post(
+        def send_telegram(msg):
+            if not BOT_TOKEN or not CHAT_ID:
+                return
+
+        r = requests.post(
             f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg, "parse_mode": "Markdown"},
+            json={
+                "chat_id": CHAT_ID,
+                "text": msg   # ❌ no Markdown
+            },
             timeout=10
         )
+
+        if r.status_code != 200:
+            print("⚠️ Telegram error:", r.text)
+
     except:
         pass
 
@@ -143,11 +154,13 @@ def send_signal(symbol, side, value, score):
     emoji = "🟢" if side == "BUY" else "🔴"
 
     send_telegram(
-        f"{emoji} *{side} SIGNAL*\n"
-        f"*Symbol:* `{symbol}`\n"
-        f"*knnMA:* `{round(value,6)}`\n"
-        f"*Strength:* `{score}/100`\n"
-        f"*TF:* 5m (closed)"
+        f"{emoji} {side} SIGNAL\n"
+        f"Symbol: {symbol}\n"
+        f"knnMA: {round(value,6)}\n"
+        f"Strength: {score}/100\n"
+        f"TF: 5m (closed)"
+    )
+
     )
 
 # =========================
