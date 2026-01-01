@@ -1,6 +1,7 @@
 # ==========================================================
-# AI TREND NAVIGATOR — OKX VERSION (1:1 LOGIC MATCH)
-# 5M CONFIRMED CANDLE CLOSE + TELEGRAM ALERTS
+# AI TREND NAVIGATOR — OKX CONTINUOUS BOT
+# ATR-BASED TP / SL
+# CONFIRMED 5M CANDLE CLOSE ONLY
 # ==========================================================
 
 import requests
@@ -8,26 +9,28 @@ import pandas as pd
 import numpy as np
 import time
 import os
-from datetime import datetime
-
-# =========================
-# WAIT FOR CONFIRMED CANDLE
-# =========================
-time.sleep(35)
+from datetime import datetime, timedelta, timezone
 
 # =========================
 # CONFIG
 # =========================
 TIMEFRAME = "5m"
+
 PRICE_LEN = 5
 TARGET_LEN = 5
 NUM_CLOSEST = 3
 SMOOTHING = 5
 
+ATR_LEN = 14
+ATR_SL_MULT = 1.0
+ATR_TP_MULT = 2.0
+
 OKX = "https://www.okx.com"
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+IST = timezone(timedelta(hours=5, minutes=30))
 
 # =========================
 # TELEGRAM
@@ -36,25 +39,32 @@ def send_telegram(msg):
     if not BOT_TOKEN or not CHAT_ID:
         return
 
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
-            json={"chat_id": CHAT_ID, "text": msg},
-            timeout=10
-        )
-    except Exception as e:
-        print("Telegram error:", e)
+    requests.post(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage",
+        json={"chat_id": CHAT_ID, "text": msg},
+        timeout=10
+    )
 
 # =========================
-# SYMBOLS (TOP 25 USDT)
+# WAIT UNTIL NEXT 5M CLOSE
+# =========================
+def wait_for_next_5m():
+    now = time.time()
+    next_close = ((now // 300) + 1) * 300
+    time.sleep(max(0, next_close - now + 35))
+
+# =========================
+# SYMBOLS
 # =========================
 def top_25():
-    r = requests.get(f"{OKX}/api/v5/market/tickers?instType=SPOT", timeout=10).json()
-    data = r.get("data", [])
+    r = requests.get(
+        f"{OKX}/api/v5/market/tickers?instType=SPOT",
+        timeout=10
+    ).json()
 
+    data = r.get("data", [])
     usdt = [x for x in data if x["instId"].endswith("-USDT")]
     usdt.sort(key=lambda x: float(x["volCcy24h"]), reverse=True)
-
     return [x["instId"] for x in usdt[:25]]
 
 # =========================
@@ -63,11 +73,7 @@ def top_25():
 def klines(symbol):
     r = requests.get(
         f"{OKX}/api/v5/market/candles",
-        params={
-            "instId": symbol,
-            "bar": TIMEFRAME,
-            "limit": 200
-        },
+        params={"instId": symbol, "bar": TIMEFRAME, "limit": 200},
         timeout=10
     ).json()
 
@@ -75,18 +81,18 @@ def klines(symbol):
     if not data:
         return None
 
-    # OKX candles are newest → oldest
     data.reverse()
 
-    df = pd.DataFrame(data, columns=[
-        "ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"
-    ])
+    df = pd.DataFrame(
+        data,
+        columns=["ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"]
+    )
 
     df[["h","l","c"]] = df[["h","l","c"]].astype(float)
     return df
 
 # =========================
-# INDICATORS (UNCHANGED)
+# INDICATORS
 # =========================
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
@@ -106,13 +112,30 @@ def wma(series, length):
         raw=True
     )
 
+def atr(df, length):
+    high = df["h"]
+    low = df["l"]
+    close = df["c"].shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - close).abs(),
+        (low - close).abs()
+    ], axis=1).max(axis=1)
+
+    return tr.rolling(length).mean()
+
 # =========================
-# SCAN ONCE (CONFIRMED CANDLE)
+# STATE (ANTI-DUPLICATE)
 # =========================
-def scan_once():
+last_state = {}
+
+# =========================
+# SCAN
+# =========================
+def scan():
     symbols = top_25()
     if not symbols:
-        print("No symbols fetched.")
         return
 
     for sym in symbols:
@@ -124,47 +147,65 @@ def scan_once():
         value_in = hl2.rolling(PRICE_LEN).mean()
         target = df["c"].rolling(TARGET_LEN).mean()
 
-        knn = mean_of_k_closest(
-            value_in.values,
-            target.values,
-            NUM_CLOSEST
-        )
-
+        knn = mean_of_k_closest(value_in.values, target.values, NUM_CLOSEST)
         knn = wma(pd.Series(knn), SMOOTHING)
 
         if len(knn) < 3:
             continue
 
-        # CONFIRMED CANDLE ONLY
         a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
         if np.isnan([a, b, c]).any():
             continue
 
-        switch_up = b < c and b <= a
-        switch_dn = b > c and b >= a
+        buy = b < c and b <= a
+        sell = b > c and b >= a
 
-        if switch_up or switch_dn:
-            side = "BUY" if switch_up else "SELL"
-            strength = round(abs(c - b) / abs(b) * 100, 2)
+        state = "GREEN" if buy else "RED" if sell else None
+        if not state or last_state.get(sym) == state:
+            continue
 
-            msg = (
-                f"📈 {side} SIGNAL (OKX)\n"
-                f"Symbol: {sym}\n"
-                f"Timeframe: 5m\n"
-                f"Strength: {strength}%\n"
-                f"Confirmed candle close\n"
-                f"UTC: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        last_state[sym] = state
 
-            send_telegram(msg)
+        entry = round(df["c"].iloc[-2], 6)
+
+        atr_val = atr(df, ATR_LEN).iloc[-2]
+        if np.isnan(atr_val):
+            continue
+
+        if state == "GREEN":
+            side = "🟢BUY"
+            sl = round(entry - ATR_SL_MULT * atr_val, 6)
+            tp = round(entry + ATR_TP_MULT * atr_val, 6)
+        else:
+            side = "🔴SELL"
+            sl = round(entry + ATR_SL_MULT * atr_val, 6)
+            tp = round(entry - ATR_TP_MULT * atr_val, 6)
+
+        ist_time = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S")
+
+        msg = (
+            f"{side} SIGNAL (OKX)\n"
+            f"Symbol: {sym}\n"
+            f"Entry: {entry}\n"
+            f"ATR({ATR_LEN}): {round(atr_val,6)}\n"
+            f"TP: {tp}\n"
+            f"SL: {sl}\n"
+            f"IST: {ist_time}"
+        )
+
+        send_telegram(msg)
 
 # =========================
-# START
+# MAIN LOOP
 # =========================
 if __name__ == "__main__":
     send_telegram(
         "🚀 Bot Started (OKX)\n"
         "Timeframe: 5m\n"
+        "TP/SL: ATR-based\n"
         "Mode: Confirmed candle close only"
     )
-    scan_once()
+
+    while True:
+        wait_for_next_5m()
+        scan()
