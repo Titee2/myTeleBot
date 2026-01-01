@@ -1,7 +1,6 @@
 # ==========================================================
-# AI TREND NAVIGATOR — GITHUB ACTIONS SAFE VERSION
+# AI TREND NAVIGATOR — OKX VERSION (1:1 LOGIC MATCH)
 # 5M CONFIRMED CANDLE CLOSE + TELEGRAM ALERTS
-# BINANCE MIRROR ROTATION ENABLED
 # ==========================================================
 
 import requests
@@ -25,23 +24,10 @@ TARGET_LEN = 5
 NUM_CLOSEST = 3
 SMOOTHING = 5
 
+OKX = "https://www.okx.com"
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-
-# =========================
-# BINANCE MIRRORS (ROTATED)
-# =========================
-BINANCE_MIRRORS = [
-    "https://api.binance.com",
-    "https://api1.binance.com",
-    "https://api2.binance.com",
-    "https://api3.binance.com",
-    "https://fapi.binance.com"
-]
-
-current_mirror = 0
-fail_count = 0
-MAX_FAILS = 3
 
 # =========================
 # TELEGRAM
@@ -60,78 +46,47 @@ def send_telegram(msg):
         print("Telegram error:", e)
 
 # =========================
-# BINANCE REQUEST (ROTATING)
-# =========================
-def binance_get(path, params=None):
-    global current_mirror, fail_count
-
-    for _ in range(len(BINANCE_MIRRORS)):
-        base = BINANCE_MIRRORS[current_mirror]
-        url = base + path
-
-        try:
-            r = requests.get(url, params=params, timeout=10)
-            data = r.json()
-
-            # Binance error → rotate
-            if isinstance(data, dict) and "code" in data:
-                print(f"Binance error @ {base}: {data}")
-                raise Exception("Binance API error")
-
-            # Success → reset fail count
-            fail_count = 0
-            return data
-
-        except Exception as e:
-            print(f"Mirror failed: {base}")
-            fail_count += 1
-            current_mirror = (current_mirror + 1) % len(BINANCE_MIRRORS)
-            time.sleep(1)
-
-            if fail_count >= MAX_FAILS:
-                print("Too many failures, aborting run.")
-                return None
-
-    return None
-
-# =========================
-# SYMBOL SELECTION
+# SYMBOLS (TOP 25 USDT)
 # =========================
 def top_25():
-    data = binance_get("/api/v3/ticker/24hr")
-    if not data:
-        return []
+    r = requests.get(f"{OKX}/api/v5/market/tickers?instType=SPOT", timeout=10).json()
+    data = r.get("data", [])
 
-    usdt = [x for x in data if x.get("symbol", "").endswith("USDT")]
-    usdt.sort(key=lambda x: float(x.get("quoteVolume", 0)), reverse=True)
-    return [x["symbol"] for x in usdt[:25]]
+    usdt = [x for x in data if x["instId"].endswith("-USDT")]
+    usdt.sort(key=lambda x: float(x["volCcy24h"]), reverse=True)
+
+    return [x["instId"] for x in usdt[:25]]
 
 # =========================
 # KLINES
 # =========================
 def klines(symbol):
-    data = binance_get(
-        "/api/v3/klines",
+    r = requests.get(
+        f"{OKX}/api/v5/market/candles",
         params={
-            "symbol": symbol,
-            "interval": TIMEFRAME,
+            "instId": symbol,
+            "bar": TIMEFRAME,
             "limit": 200
-        }
-    )
+        },
+        timeout=10
+    ).json()
 
+    data = r.get("data")
     if not data:
         return None
 
+    # OKX candles are newest → oldest
+    data.reverse()
+
     df = pd.DataFrame(data, columns=[
-        "ot","o","h","l","c","v",
-        "ct","q","n","tbb","tbq","ig"
+        "ts","o","h","l","c","v","volCcy","volCcyQuote","confirm"
     ])
 
     df[["h","l","c"]] = df[["h","l","c"]].astype(float)
     return df
 
 # =========================
-# INDICATORS
+# INDICATORS (UNCHANGED)
 # =========================
 def mean_of_k_closest(value, target, k):
     window = max(k, 30)
@@ -152,7 +107,7 @@ def wma(series, length):
     )
 
 # =========================
-# SCAN ONCE (CONFIRMED)
+# SCAN ONCE (CONFIRMED CANDLE)
 # =========================
 def scan_once():
     symbols = top_25()
@@ -180,19 +135,20 @@ def scan_once():
         if len(knn) < 3:
             continue
 
+        # CONFIRMED CANDLE ONLY
         a, b, c = knn.iloc[-3], knn.iloc[-2], knn.iloc[-1]
         if np.isnan([a, b, c]).any():
             continue
 
-        buy = b < c and b <= a
-        sell = b > c and b >= a
+        switch_up = b < c and b <= a
+        switch_dn = b > c and b >= a
 
-        if buy or sell:
-            side = "BUY" if buy else "SELL"
+        if switch_up or switch_dn:
+            side = "BUY" if switch_up else "SELL"
             strength = round(abs(c - b) / abs(b) * 100, 2)
 
             msg = (
-                f"📊 {side} SIGNAL\n"
+                f"📈 {side} SIGNAL (OKX)\n"
                 f"Symbol: {sym}\n"
                 f"Timeframe: 5m\n"
                 f"Strength: {strength}%\n"
@@ -206,5 +162,9 @@ def scan_once():
 # START
 # =========================
 if __name__ == "__main__":
-    send_telegram("🚀 Bot Started\nTimeframe: 5m\nMode: Confirmed candle close only")
+    send_telegram(
+        "🚀 Bot Started (OKX)\n"
+        "Timeframe: 5m\n"
+        "Mode: Confirmed candle close only"
+    )
     scan_once()
